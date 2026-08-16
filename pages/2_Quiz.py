@@ -3,27 +3,46 @@ housing_quiz.py  –  Pairwise preference quiz for student housing
 Run with:  streamlit run housing_quiz.py
 """
 
-import streamlit as st
-import numpy as np
-import pandas as pd
+import streamlit as st # type: ignore
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
 import math
 import json
 import random
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
+import requests # type: ignore
+from sklearn.linear_model import LogisticRegression # type: ignore
+from sklearn.linear_model import LinearRegression # type: ignore
+from sklearn.preprocessing import StandardScaler # type: ignore
+import streamlit.components.v1 as components # type: ignore
 from itertools import combinations
+import folium # type: ignore
+from folium import plugins # type: ignore
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Find Your Place",
     page_icon="🏠",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ── Styling ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+.price-deal {
+    font-size: 0.85rem;
+    margin-top: 0.4rem;
+    color: #2D6A4F;
+    font-weight: 600;
+}
+.price-over {
+    font-size: 0.85rem;
+    margin-top: 0.4rem;
+    color: #C0392B;
+    font-weight: 600;
+}
 
 /* Global */
 html, body, [class*="css"] {
@@ -33,9 +52,26 @@ html, body, [class*="css"] {
 }
 
 /* Hide default Streamlit chrome */
-#MainMenu, footer, header { visibility: hidden; }
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+section[data-testid="stSidebarNav"] { display: block !important; }
+button[data-testid="collapsedControl"] { display: block !important; }
+button[kind="header"] { display: block !important; }
 .block-container { padding: 2rem 3rem; max-width: 1100px; }
 
+.stAppHeader {
+        background-color: rgba(255, 255, 255, 0.0); /* Transparent background */
+    }
+    .block-container {
+        padding-top: 1rem; /* Adjust this value to 0rem or 1rem */
+        padding-bottom: 0rem;
+        margin-top: 0rem;
+    }
+
+.block-container {
+        padding-bottom: 3rem;
+    }
+               
 /* Title */
 .quiz-title {
     font-family: 'DM Serif Display', serif;
@@ -143,7 +179,7 @@ html, body, [class*="css"] {
 </style>
 """, unsafe_allow_html=True)
 
-# distance formula using Haversine formula--------------------------------------
+# distance calculation using Haversine formula----------------------------------
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
 
@@ -158,24 +194,22 @@ def haversine(lat1, lon1, lat2, lon2):
     return distance
 #-------------------------------------------------------------------------------
 
-# ── Sample data (replace with your RentCast API data) ────────────────────────
-# Each listing must have: price, bedrooms, bathrooms, distance (miles from campus)
-
 with open("listings.json") as f:
     raw = json.load(f)
 
 df = pd.DataFrame(raw)
 
-# add distance to the dataframe
+# add distance to the dataframe. Note the current coordinates are hardcoded as the center of the University of Michigan's Central Campus.
+# You may modify these as is relevant to your purpose.
 df["distance"] = df.apply(lambda row: round(haversine(row["latitude"], row["longitude"], 42.2770, -83.7382), 1), axis=1)
 
-df = df.dropna(subset=["price", "bedrooms", "bathrooms", "distance"])
+df = df.dropna(subset = ["price", "bedrooms", "bathrooms", "distance"])
 
-# Assign a clean integer id if one doesn't already exist
+# Assign integer id if one doesn't already exist
 if "id" not in df.columns:
     df["id"] = range(len(df))
 
-SAMPLE_LISTINGS = df[["id", "formattedAddress", "price", "bedrooms", "bathrooms", "distance"]].to_dict(orient="records")
+SAMPLE_LISTINGS = df[["id", "formattedAddress", "price", "bedrooms", "bathrooms", "distance", "latitude", "longitude"]].to_dict(orient="records")
 
 FEATURES = ["price", "bedrooms", "bathrooms", "distance"]
 FEATURE_LABELS = {
@@ -189,6 +223,9 @@ FEATURE_DIRECTION = {"price": -1, "bedrooms": 1, "bathrooms": 1, "distance": -1}
 
 MIN_COMPARISONS_TO_TRAIN = 6
 QUIZ_LENGTH = 15  # stop accepting new comparisons after this many
+CONFIDENCE_THRESHOLD = 0.35
+# Note: confidence threshold is something I'm still tuning. Future improvements could
+# make use of some math I don't know to determine the optimal value here
 
 
 # ── Feature helpers ───────────────────────────────────────────────────────────
@@ -205,6 +242,87 @@ def normalize_features(listings):
     scaler = StandardScaler()
     scaler.fit(X)
     return scaler
+
+def price_delta(listing, price_model):
+    X = np.array([[listing["bedrooms"], listing["bathrooms"], listing["distance"]]])
+    predicted = price_model.predict(X)[0]
+    delta = listing["price"] - predicted
+    pct = (delta / predicted) * 100
+    return delta, pct
+
+def has_street_view(address):
+    api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
+    encoded = address.replace(" ", "+").replace(",", "%2C")
+    url = (
+        f"https://maps.googleapis.com/maps/api/streetview/metadata"
+        f"?location={encoded}&key={api_key}"
+    )
+    r = requests.get(url)
+    return r.json().get("status") == "OK"
+
+def street_view_url(address):
+    api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
+    encoded = address.replace(" ", "+").replace(",", "%2C")
+    return (
+        f"https://maps.googleapis.com/maps/api/streetview"
+        f"?size=600x220&location={encoded}&fov=90&pitch=5&key={api_key}"
+    )
+
+def render_street_view_interactive(listing):
+    api_key = st.secrets["GOOGLE_MAPS_API_KEY"]
+    lat = listing["latitude"]
+    lng = listing["longitude"]
+    html = f"""
+    <div id="street-view" style="width:100%;height:250px;border-radius:12px;overflow:hidden;"></div>
+    <script>
+        function initialize() {{
+            var position = {{lat: {lat}, lng: {lng}}};
+            var panorama = new google.maps.StreetViewPanorama(
+                document.getElementById('street-view'),
+                {{
+                    position: position,
+                    pov: {{ heading: 34, pitch: 5 }},
+                    zoom: 1,
+                    addressControl: false,
+                    fullscreenControl: false,
+                    motionTracking: false,
+                }}
+            );
+            var sv = new google.maps.StreetViewService();
+            sv.getPanorama({{location: position, radius: 50}}, function(data, status) {{
+                if (status !== 'OK') {{
+                    document.getElementById('street-view').innerHTML = 
+                        '<div style="height:250px;display:flex;align-items:center;justify-content:center;background:#f0ede8;color:#aaa;font-family:sans-serif;">No Street View available</div>';
+                }}
+            }});
+        }}
+    </script>
+    <script src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initialize" async defer></script>
+    """
+    components.html(html, height=250)
+
+def train_price_model(listings):
+    df = pd.DataFrame(listings)
+    # remove outliers
+    q_low = df["price"].quantile(0.05)
+    q_high = df["price"].quantile(0.95)
+    df = df[(df["price"] >= q_low) & (df["price"] <= q_high)]
+    # X = df.dropna(subset = ["bedrooms", "bathrooms", "distance"]).astype(float)
+    X = df[["bedrooms", "bathrooms", "distance"]].astype(float)
+    y = df["price"].astype(float)
+    model = LinearRegression()
+    model.fit(X, y)
+    return model
+
+def model_is_confident(listings, model, scaler, threshold=0.1):
+    X_norm = scaler.transform(np.array([feature_vector(l) for l in listings]))
+    uncertainties = []
+    for i, j in combinations(range(len(listings)), 2):
+        diff = (X_norm[i] - X_norm[j]).reshape(1, -1)
+        prob = model.predict_proba(diff)[0][1]
+        uncertainties.append(abs(prob - 0.5))
+    confidence = 1.0 - (np.mean(uncertainties) / 0.5)
+    return confidence >= CONFIDENCE_THRESHOLD
 
 
 # ── Pair selection ────────────────────────────────────────────────────────────
@@ -324,9 +442,10 @@ def init_state():
         "comparisons": [],
         "current_pair": None,
         "model": None,
-        "scaler": normalize_features(SAMPLE_LISTINGS),
+        "scaler": normalize_features(st.session_state.get("filtered_listings", SAMPLE_LISTINGS)),
         "quiz_done": False,
-        "listings": SAMPLE_LISTINGS,
+        "listings": st.session_state.get("filtered_listings", SAMPLE_LISTINGS),
+        "price_model": train_price_model(st.session_state.get("filtered_listings", SAMPLE_LISTINGS)),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -335,10 +454,33 @@ def init_state():
 init_state()
 s = st.session_state
 
+# Always sync listings to whatever filter page saved
+if "filtered_listings" in st.session_state:
+    s.listings = st.session_state["filtered_listings"]
+    s.scaler = normalize_features(s.listings)
+    s.price_model = train_price_model(s.listings)
+    # Clear quiz state so old comparisons don't reference stale listing IDs
+    s.comparisons = []
+    s.current_pair = None
+    s.model = None
+    s.quiz_done = False
+    # Consume the filtered_listings so this reset only happens once
+    del st.session_state["filtered_listings"]
+
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 def render_listing_card(listing, side_label):
     deal_score = ""
+    delta, pct = price_delta(listing, s.price_model)
+    delta_class = "price-deal" if delta < 0 else "price-over"
+    if delta < 0:
+        delta_color = "#2D6A4F"
+        delta_arrow = "▼"
+        delta_text = f"${abs(delta):.0f}/mo below predicted ({abs(pct):.0f}% deal)"
+    else:
+        delta_color = "#C0392B"
+        delta_arrow = "▲"
+        delta_text = f"${delta:.0f}/mo above predicted ({pct:.0f}% over)"
     if s.model:
         X_norm = s.scaler.transform(feature_vector(listing).reshape(1, -1))
         avg_norm = s.scaler.transform(
@@ -346,7 +488,13 @@ def render_listing_card(listing, side_label):
         )
         prob = s.model.predict_proba(X_norm - avg_norm)[0][1]
         deal_score = f'<span class="listing-tag">Match score: {prob:.0%}</span>'
+    else:
+        deal_score = '<div></div>'
  
+    if has_street_view(listing['formattedAddress']):
+        render_street_view_interactive(listing)
+    else:
+        st.caption("No Street View available for this address.")
     st.markdown(f"""
     <div class="listing-card">
         <div class="listing-address">{listing['formattedAddress']}</div>
@@ -357,6 +505,7 @@ def render_listing_card(listing, side_label):
             <span>📍 {listing['distance']} mi from campus</span>
         </div>
         {deal_score}
+        <div class="{delta_class}">{delta_arrow} {delta_text}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -366,7 +515,7 @@ def choose(side):
     pair = s.current_pair
     s.comparisons.append({"a": pair[0], "b": pair[1], "chosen": side})
     s.model = train_model(s.comparisons, s.scaler, s.listings)
-    if len(s.comparisons) >= QUIZ_LENGTH:
+    if len(s.comparisons) >= MIN_COMPARISONS_TO_TRAIN and model_is_confident(s.listings, s.model, s.scaler):
         s.quiz_done = True
     else:
         s.current_pair = None  # force re-selection on next render
@@ -375,6 +524,7 @@ def choose(side):
 # ── Main UI ───────────────────────────────────────────────────────────────────
 st.markdown('<div class="quiz-title">Find Your Place</div>', unsafe_allow_html=True)
 st.markdown('<div class="quiz-subtitle">Answer a few quick comparisons and we\'ll learn what matters most to you.</div>', unsafe_allow_html=True)
+# st.page_link("pages/1_Filter_Listings.py", label="⚙️ Filter listings", icon="🔍")
 
 # ── Results view ──────────────────────────────────────────────────────────────
 if s.quiz_done and s.model:
@@ -416,18 +566,57 @@ if s.quiz_done and s.model:
             """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🔄 Retake quiz"):
-            for k in ["comparisons", "current_pair", "model", "quiz_done"]:
-                del st.session_state[k]
-            st.rerun()
+        
+    st.markdown("---")
+    st.markdown("### 📍 Top listings map")
+
+    ranked = rank_listings(s.listings, s.model, s.scaler)
+
+    # Center map on the mean coordinates of top 10
+    top10 = ranked[:10]
+    avg_lat = sum(l["latitude"] for _, l in top10) / len(top10)
+    avg_lng = sum(l["longitude"] for _, l in top10) / len(top10)
+
+    m = folium.Map(location=[avg_lat, avg_lng], zoom_start=13, tiles="CartoDB positron")
+
+    # Green shades only, no near-blacks
+    colors = ["darkgreen", "green", "lightgreen", "darkgreen", "green",
+            "lightgreen", "darkgreen", "green", "lightgreen", "darkgreen"]
+
+    for i, (score, listing) in enumerate(top10):
+        folium.Marker(
+            location=[listing["latitude"], listing["longitude"]],
+            popup=folium.Popup(
+                f"<b>#{i+1} {listing['formattedAddress']}</b><br>"
+                f"${listing['price']:,}/mo · Match: {score:.0%}",
+                max_width=250
+            ),
+            tooltip=f"#{i+1} — ${listing['price']:,}/mo",
+            icon=folium.Icon(color=colors[i], icon="home", prefix="fa"),
+        ).add_to(m)
+
+    components.html(m._repr_html_(), height=450)
+
+    st.markdown("**Top 10 listings**")
+    for i, (score, listing) in enumerate(top10, 1):
+        st.caption(f"**#{i}** {listing['formattedAddress']} — ${listing['price']:,}/mo · Match: {score:.0%}")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🔄 Retake quiz"):
+        for k in ["comparisons", "current_pair", "model", "quiz_done"]:
+            del st.session_state[k]
+        st.rerun()
 
 # ── Quiz view ─────────────────────────────────────────────────────────────────
 else:
     n = len(s.comparisons)
-    progress = n / QUIZ_LENGTH
-
-    st.markdown(f'<div class="progress-label">Comparison {n + 1} of {QUIZ_LENGTH}</div>', unsafe_allow_html=True)
-    st.progress(progress)
+    if s.model and n >= MIN_COMPARISONS_TO_TRAIN:
+        st.markdown(f'<div class="progress-label">Comparison {n + 1} — refining your preferences</div>', unsafe_allow_html=True)
+        st.progress(min(n / QUIZ_LENGTH, 1.0))
+        st.caption("The quiz will end automatically when the model has learned enough about your preferences.")
+    else:
+        st.markdown(f'<div class="progress-label">Comparison {n + 1} — building initial model ({n}/{MIN_COMPARISONS_TO_TRAIN} needed)</div>', unsafe_allow_html=True)
+        st.progress(n / MIN_COMPARISONS_TO_TRAIN)
 
     # Show active learning status once it kicks in
     if n >= MIN_COMPARISONS_TO_TRAIN and s.model:
@@ -449,7 +638,7 @@ else:
 
     with col_a:
         render_listing_card(listing_a, "a")
-        if st.button("I'd prefer this one →", key="choose_a", use_container_width=True):
+        if st.button("I'd prefer this one →", key="choose_a", width="stretch"):
             choose("a")
             st.rerun()
 
@@ -458,7 +647,7 @@ else:
 
     with col_b:
         render_listing_card(listing_b, "b")
-        if st.button("← I'd prefer this one", key="choose_b", use_container_width=True):
+        if st.button("← I'd prefer this one", key="choose_b", width="stretch"):
             choose("b")
             st.rerun()
 
@@ -466,7 +655,7 @@ else:
     st.markdown("<br>", unsafe_allow_html=True)
     skip_col, _ = st.columns([1, 4])
     with skip_col:
-        if st.button("Skip – too similar to judge", use_container_width=True):
+        if st.button("Skip – too similar to judge", width="stretch"):
             s.current_pair = None
             st.rerun()
 
