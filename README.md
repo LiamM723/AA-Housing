@@ -2,8 +2,7 @@
 
 A Streamlit web app that helps University of Michigan students find rental listings that actually match their preferences, using pairwise comparisons and active learning.
 
-![Demo](demo.gif)
-<!-- Replace with an actual screen recording GIF of the app in action -->
+<video>src="/Users/liammiller/Downloads/My Movie 1.mp4"</video>
 
 ## How it works
 
@@ -72,6 +71,7 @@ Start on the landing page, filter listings to a relevant subset, then take the c
 
 ## Known limitations
 
+- As of August 17 2026, The interactive street view was discovered to be non-functional. Since it is not part of the core functionality of the ranking algorithm and this project was not developed with the intent to become a fully public website, this issue is low on my list of priorities and will be left alone for the near future.
 - Listing data is a static snapshot (`listings.json`) rather than a live feed.
 - The price-prediction models use a small, fixed feature set (bedrooms, bathrooms, and distance to a predetermined landmark) and don't account for other factors that affect rent (amenities, building age, etc.).
 - Preference learning starts cold each session — the model doesn't currently persist or reuse a user's preferences across visits.
