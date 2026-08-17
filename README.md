@@ -2,7 +2,7 @@
 
 A Streamlit web app that helps University of Michigan students find rental listings that actually match their preferences, using pairwise comparisons and active learning.
 
-<video>src="/Users/liammiller/Downloads/My Movie 1.mp4"</video>
+https://github.com/user-attachments/assets/925a6ec7-2430-4fe8-9edb-b2484eb5cfeb
 
 ## How it works
 
